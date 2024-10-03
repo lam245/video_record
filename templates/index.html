@@ -84,6 +84,20 @@
             border: 1px solid #ddd;
             padding: 10px;
         }
+        .color-select, .type-select {
+            width: 100px;
+            padding: 5px;
+            margin-right: 10px;
+            vertical-align: middle;
+        }
+        .clothing-input {
+            display: flex;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+        .clothing-input label {
+            margin-right: 10px;
+        }
     </style>
 </head>
 <body>
@@ -117,18 +131,12 @@
     </div>
     
     <div class="video-container">
+        {% for i in range(1, num_cameras + 1) %}
         <div class="video-feed">
-            <h3>Camera 1</h3>
-            <img src="{{ url_for('video_feed', camera_id=1) }}" alt="Camera 1">
+            <h3>Camera {{ i }}</h3>
+            <img src="{{ url_for('video_feed', camera_id=i) }}" alt="Camera {{ i }}">
         </div>
-        <div class="video-feed">
-            <h3>Camera 2</h3>
-            <img src="{{ url_for('video_feed', camera_id=2) }}" alt="Camera 2">
-        </div>
-        <div class="video-feed">
-            <h3>Camera 3</h3>
-            <img src="{{ url_for('video_feed', camera_id=3) }}" alt="Camera 3">
-        </div>
+        {% endfor %}
     </div>
 
     <div id="jsonPopup" class="popup">
@@ -193,6 +201,22 @@
             $('#generateForms').click(function() {
                 var numPeople = $('#numPeople').val();
                 var formsHtml = '';
+                var colorOptions = ['Red', 'Blue', 'Green', 'Yellow', 'Black', 'White', 'Gray'];
+                var shirtTypes = ['T-shirt', 'Button-up', 'Polo', 'Sweater', 'Hoodie', 'Tank top'];
+                var pantsTypes = ['Jeans', 'Khakis', 'Shorts', 'Sweatpants', 'Slacks', 'Skirt'];
+                
+                var colorSelectHtml = colorOptions.map(color => 
+                    `<option value="${color.toLowerCase()}">${color}</option>`
+                ).join('');
+                
+                var shirtTypeHtml = shirtTypes.map(type => 
+                    `<option value="${type.toLowerCase()}">${type}</option>`
+                ).join('');
+                
+                var pantsTypeHtml = pantsTypes.map(type => 
+                    `<option value="${type.toLowerCase()}">${type}</option>`
+                ).join('');
+
                 for (var i = 0; i < numPeople; i++) {
                     formsHtml += `
                         <div class="person-form">
@@ -204,9 +228,31 @@
                                 <option value="other">Other</option>
                             </select></label><br>
                             <h4>Clothes:</h4>
-                            <label>Shirt: <input type="text" class="shirt" required></label><br>
-                            <label>Pants: <input type="text" class="pants" required></label><br>
-                            <label>Hat: <input type="text" class="hat"></label><br>
+                            <div class="clothing-input">
+                                <label>Shirt:</label>
+                                <select class="shirt-color color-select">
+                                    ${colorSelectHtml}
+                                </select>
+                                <select class="shirt-type type-select">
+                                    ${shirtTypeHtml}
+                                </select>
+                            </div>
+                            <div class="clothing-input">
+                                <label>Pants:</label>
+                                <select class="pants-color color-select">
+                                    ${colorSelectHtml}
+                                </select>
+                                <select class="pants-type type-select">
+                                    ${pantsTypeHtml}
+                                </select>
+                            </div>
+                            <div class="clothing-input">
+                                <label>Hat:</label>
+                                <select class="hat-color color-select">
+                                    ${colorSelectHtml}
+                                </select>
+                                <input type="text" class="hat-type">
+                            </div>
                             <label>Glasses: <input type="text" class="glasses"></label><br>
                             <label>Mask: <input type="text" class="mask"></label><br>
                         </div>
@@ -228,9 +274,9 @@
                         age: $(this).find('.age').val(),
                         gender: $(this).find('.gender').val(),
                         clothes: {
-                            shirt: $(this).find('.shirt').val(),
-                            pants: $(this).find('.pants').val(),
-                            hat: $(this).find('.hat').val() || "",
+                            shirt: $(this).find('.shirt-color').val() + ' ' + $(this).find('.shirt-type').val(),
+                            pants: $(this).find('.pants-color').val() + ' ' + $(this).find('.pants-type').val(),
+                            hat: $(this).find('.hat-color').val() + ' ' + ($(this).find('.hat-type').val() || ""),
                             glasses: $(this).find('.glasses').val() || "",
                             mask: $(this).find('.mask').val() || ""
                         }

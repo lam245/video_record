@@ -4,20 +4,26 @@ import threading
 import time
 import os
 import logging
-app = Flask(__name__)
 import json
+
+app = Flask(__name__)
+
 # Set up logging
 logging.basicConfig(level=logging.DEBUG)
-# RTSP URLs for the cameras
-rtsp_urls = [
-    'rtsp://admin:Phunggi@911@192.168.3.56:554/profile2/media.smp',
-    'rtsp://admin:Phunggi@911@192.168.3.60:554/profile2/media.smp',
-    'rtsp://admin:Phunggi@911@192.168.3.50:554/profile2/media.smp'
-]
+
+# Function to read camera configuration from file
+def read_camera_config(filename='camera_config.txt'):
+    with open(filename, 'r') as f:
+        num_cameras = int(f.readline().strip())
+        rtsp_urls = [line.strip() for line in f.readlines()]
+    return num_cameras, rtsp_urls
+
+# Read camera configuration
+num_cameras, rtsp_urls = read_camera_config()
 
 recording = False
 threads = []
-camera_frames = [None, None, None]
+camera_frames = [None] * num_cameras
 recording_type = "crowd"  # Default recording type
 folder_name = ""  # Global variable to store the folder name
 
@@ -25,11 +31,33 @@ folder_name = ""  # Global variable to store the folder name
 base_video_dir = './videos'
 os.makedirs(base_video_dir, exist_ok=True)
 
-def record_camera(url, camera_id):
+# Global list to store camera capture objects
+camera_captures = []
+
+def initialize_cameras():
+    global camera_captures
+    for url in rtsp_urls:
+        cap = cv2.VideoCapture(url)
+        if not cap.isOpened():
+            print(f"Error: Couldn't open camera {url}")
+            cap = None
+        camera_captures.append(cap)
+
+def update_camera_frames():
+    global camera_frames, camera_captures
+    while True:
+        for i, cap in enumerate(camera_captures):
+            if cap is not None and cap.isOpened():
+                ret, frame = cap.read()
+                if ret:
+                    camera_frames[i] = frame
+        time.sleep(0.1)
+
+def record_camera(camera_id):
     global recording, camera_frames, recording_type, folder_name
-    cap = cv2.VideoCapture(url)
-    if not cap.isOpened():
-        print(f"Error: Couldn't open camera {camera_id}")
+    cap = camera_captures[camera_id]
+    if cap is None or not cap.isOpened():
+        print(f"Error: Camera {camera_id} is not available")
         return
 
     fps = cap.get(cv2.CAP_PROP_FPS)
@@ -39,35 +67,30 @@ def record_camera(url, camera_id):
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    timestamp = int(time.time())
-    filename = f'{folder_name}_camera_{camera_id}.mp4'
+    filename = f'{folder_name}_camera_{camera_id+1}.mp4'
     filepath = os.path.join(base_video_dir, folder_name, filename)
     os.makedirs(os.path.dirname(filepath), exist_ok=True)
     
     out = cv2.VideoWriter(filepath, fourcc, fps, (width, height))
     if not out.isOpened():
         print(f"Error: Couldn't open VideoWriter for camera {camera_id}")
-        cap.release()
         return
 
     while recording:
-        ret, frame = cap.read()
-        if not ret:
-            print(f"Error: Couldn't read frame from camera {camera_id}")
-            break
-        camera_frames[camera_id-1] = frame
-        if frame.shape[1] != width or frame.shape[0] != height:
-            frame = cv2.resize(frame, (width, height))
-        out.write(frame)
+        if camera_frames[camera_id] is not None:
+            frame = camera_frames[camera_id]
+            if frame.shape[1] != width or frame.shape[0] != height:
+                frame = cv2.resize(frame, (width, height))
+            out.write(frame)
+        time.sleep(0.1)
 
-    cap.release()
     out.release()
     print(f"Recording stopped for camera {camera_id}")
 
 def gen_frames(camera_id):
     while True:
-        if camera_frames[camera_id-1] is not None:
-            small_frame = cv2.resize(camera_frames[camera_id-1], (320, 240))
+        if camera_frames[camera_id] is not None:
+            small_frame = cv2.resize(camera_frames[camera_id], (320, 240))
             ret, buffer = cv2.imencode('.jpg', small_frame)
             frame = buffer.tobytes()
             yield (b'--frame\r\n'
@@ -82,7 +105,7 @@ def index():
             if file.endswith('.mp4'):
                 rel_dir = os.path.relpath(root, base_video_dir)
                 video_files.append(os.path.join(rel_dir, file))
-    return render_template('index.html', video_files=video_files)
+    return render_template('index.html', video_files=video_files, num_cameras=num_cameras)
 
 @app.route('/download/<path:filename>')
 def download_file(filename):
@@ -90,7 +113,7 @@ def download_file(filename):
 
 @app.route('/video_feed/<int:camera_id>')
 def video_feed(camera_id):
-    return Response(gen_frames(camera_id),
+    return Response(gen_frames(camera_id-1),
                     mimetype='multipart/x-mixed-replace; boundary=frame')
 
 @app.route('/start_recording', methods=['POST'])
@@ -103,8 +126,8 @@ def start_recording():
             return jsonify({"status": "Error: Filename is required"})
         
         recording = True
-        for i, url in enumerate(rtsp_urls):
-            thread = threading.Thread(target=record_camera, args=(url, i+1))
+        for i in range(num_cameras):
+            thread = threading.Thread(target=record_camera, args=(i,))
             thread.start()
             threads.append(thread)
         return jsonify({"status": f"Recording started - {recording_type}", "filename": folder_name})
@@ -170,9 +193,8 @@ def get_json(folder_name):
     else:
         return jsonify({"error": "JSON file not found"}), 404
 
-# ... (rest of the previous code remains the same)
-
 if __name__ == '__main__':
-    app.run(debug=True)
-if __name__ == '__main__':
-    app.run(debug=True)
+    initialize_cameras()
+    frame_update_thread = threading.Thread(target=update_camera_frames, daemon=True)
+    frame_update_thread.start()
+    app.run(debug=True, use_reloader=False)
