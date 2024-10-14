@@ -1,4 +1,0 @@
-3
-rtsp://admin:Phunggi@911@192.168.3.56:554/profile2/media.smp
-rtsp://admin:Phunggi@911@192.168.3.60:554/profile2/media.smp
-rtsp://admin:Phunggi@911@192.168.3.50:554/profile2/media.smp

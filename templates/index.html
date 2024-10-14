@@ -98,6 +98,11 @@
         .clothing-input label {
             margin-right: 10px;
         }
+        .view-select, .section-select {
+            font-size: 18px;
+            padding: 10px 20px;
+            margin: 10px;
+        }
     </style>
 </head>
 <body>
@@ -114,20 +119,29 @@
         <br>
         <label for="manualFilename">Enter folder name to save:</label>
         <input type="text" id="manualFilename" placeholder="Enter folder name" required>
+        <select id="viewSelect" class="view-select">
+            <option value="lobby">Lobby</option>
+            <option value="car_park">Car Park</option>
+        </select>
+        <div id="currentConfig"></div>
         
+        <!-- Dropdown for section selection -->
+        <select id="sectionSelect" class="section-select">
+            <option value="section1">Section 1</option>
+            <option value="section2">Section 2</option>
+            <option value="section3">Section 3</option>
+            <option value="section4">Section 4</option>
+        </select>
+
+        <button id="changeFolderBtn">Change Folder</button>
         <br>
         <button id="startBtn">Start Recording</button>
+        <button id="changeScene"> Change Scene</button>
         <button id="stopBtn" disabled>Stop Recording</button>
         <button id="createJsonBtn">Create JSON</button>
         <div id="status"></div>
         
-        <!-- Saved Videos Section -->
-        <div class="saved-videos">
-            <h2>Saved Videos</h2>
-            {% for file in video_files %}
-                <a href="{{ url_for('download_file', filename=file) }}" target="_blank">{{ file }}</a>
-            {% endfor %}
-        </div>
+      
     </div>
     
     <div class="video-container">
@@ -153,26 +167,44 @@
 
     <script>
         $(document).ready(function() {
-            $('#startBtn').click(function() {
-                var recordingType = $('#recordingType').val();
-                var manualFilename = $('#manualFilename').val();
+            var currentFolderName = '';
+            var currentView = '';
+            var currentSection = '';
 
-                if (!manualFilename) {
-                    alert("Please enter a folder name");
+            $('#changeFolderBtn').click(function() {
+                var newFolderName = $('#manualFilename').val();
+                currentView = $('#viewSelect').val();
+                currentSection = $('#sectionSelect').val();
+                if (!newFolderName) {
+                    alert("Please enter a new folder name");
                     return;
                 }
+                currentFolderName = newFolderName;
+                $('#status').text("Folder name changed to: " + currentFolderName + "/" + currentView + "/" + currentSection);
+            });
 
+            $('#startBtn').click(function() {
+                var recordingType = $('#recordingType').val();
+                var manualFilename = currentFolderName || $('#manualFilename').val();
+                var view = currentView || $('#viewSelect').val();
+                var section = currentSection || $('#sectionSelect').val();
+                // console.log(view)
+                if (!manualFilename) {
+                    alert("Please enter a folder name or use the 'Change Folder' button");
+                    return;
+                }
                 // Disable start button and enable stop button
                 $('#startBtn').prop('disabled', true);
                 $('#stopBtn').prop('disabled', false);
-
                 $.ajax({
                     url: '/start_recording',
                     type: 'POST',
                     contentType: 'application/json',
                     data: JSON.stringify({
                         recordingType: recordingType,
-                        filename: manualFilename
+                        filename: manualFilename,
+                        view: view,
+                        section: section
                     }),
                     success: function(data) {
                         $('#status').text(data.status + " | Saved in folder: " + data.filename);
@@ -202,7 +234,7 @@
                 var numPeople = $('#numPeople').val();
                 var formsHtml = '';
                 var colorOptions = ['Red', 'Blue', 'Green', 'Yellow', 'Black', 'White', 'Gray'];
-                var shirtTypes = ['T-shirt', 'Button-up', 'Polo', 'Sweater', 'Hoodie', 'Tank top'];
+                var shirtTypes = ['ao phong', 'ao so mi'];
                 var pantsTypes = ['Jeans', 'Khakis', 'Shorts', 'Sweatpants', 'Slacks', 'Skirt'];
                 
                 var colorSelectHtml = colorOptions.map(color => 
@@ -263,11 +295,13 @@
             
             $('#submitJson').click(function() {
                 var folderName = $('#manualFilename').val();
+                var view = currentView || $('#viewSelect').val();
+                var section = currentSection || $('#sectionSelect').val();
                 if (!folderName) {
                     alert("Please enter a folder name first");
                     return;
                 }
-                
+                console.log(0)
                 var people = [];
                 $('.person-form').each(function() {
                     var person = {
@@ -283,13 +317,15 @@
                     };
                     people.push(person);
                 });
-                
+                console.log(1)
                 $.ajax({
                     url: '/create_json',
                     type: 'POST',
                     contentType: 'application/json',
                     data: JSON.stringify({
                         folderName: folderName,
+                        view: view,
+                        section: section,
                         people: people
                     }),
                     success: function(data) {
@@ -300,7 +336,68 @@
                         alert("Error creating JSON file");
                     }
                 });
+                
             });
+            function updateVideoFeeds(numCameras) {
+                var videoContainer = $('#videoContainer');
+                videoContainer.empty();
+                for (var i = 1; i <= numCameras; i++) {
+                    var videoFeed = `
+                        <div class="video-feed">
+                            <h3>Camera ${i}</h3>
+                            <img src="/video_feed/${i}?t=${new Date().getTime()}" alt="Camera ${i}">
+                        </div>
+                    `;
+                    videoContainer.append(videoFeed);
+                }
+            }
+
+            function updateCurrentConfig() {
+                fetch('/get_current_config')
+                    .then(response => response.json())
+                    .then(data => {
+                        if (data.status === 'success') {
+                            document.getElementById('currentConfig').innerHTML = `
+                                <h2>Current Configuration</h2>
+                                <p>Filename: ${data.filename}</p>
+                                <p>Number of Cameras: ${data.num_cameras}</p>
+                            `;
+                            updateVideoFeeds(data.num_cameras);
+                        } else {
+                            document.getElementById('currentConfig').innerHTML = `<p>Error: ${data.message}</p>`;
+                        }
+                    });
+            }
+
+            $('#changeScene').click(function() {
+                const selectedView = $('#viewSelect').val();
+
+                fetch('/change_scene', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({view: selectedView}),
+                })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.status === 'success') {
+                        alert(data.message);
+                        updateCurrentConfig();
+                    } else {
+                        alert('Error: ' + data.message);
+                    }
+                })
+                .catch((error) => {
+                    console.error('Error:', error);
+                    alert('An error occurred. Please try again.');
+                });
+            });
+
+            // Update the current configuration when the page loads
+            updateCurrentConfig();
+        
+
         });
     </script>
 </body>

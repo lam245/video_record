@@ -1,200 +1,227 @@
-from flask import Flask, render_template, request, jsonify, Response, send_from_directory
+from flask import Flask, render_template, request, jsonify, Response
 import cv2
 import threading
 import time
 import os
 import logging
 import json
+from queue import Queue
 
 app = Flask(__name__)
-
-# Set up logging
 logging.basicConfig(level=logging.DEBUG)
+current_filename = 'car_park_config.txt'
+view_configs = {
+    'lobby': 'lobby_config.txt',
+    'car_park': 'car_park_config.txt'
+}
 
-# Function to read camera configuration from file
-def read_camera_config(filename='camera_config.txt'):
+def read_camera_config(filename='car_park_config.txt'):
     with open(filename, 'r') as f:
         num_cameras = int(f.readline().strip())
         rtsp_urls = [line.strip() for line in f.readlines()]
     return num_cameras, rtsp_urls
 
-# Read camera configuration
 num_cameras, rtsp_urls = read_camera_config()
 
 recording = False
-threads = []
-camera_frames = [None] * num_cameras
-recording_type = "crowd"  # Default recording type
-folder_name = ""  # Global variable to store the folder name
-
-# Base directory to save the videos
+recording_type = "crowd"
 base_video_dir = './videos'
 os.makedirs(base_video_dir, exist_ok=True)
 
-# Global list to store camera capture objects
 camera_captures = []
+frame_queues = []
+camera_locks = []
+stop_threads = []
 
 def initialize_cameras():
-    global camera_captures
+    global camera_captures, frame_queues, camera_locks, stop_threads
+    camera_captures = []
+    frame_queues = []
+    camera_locks = []
+    stop_threads = []
     for url in rtsp_urls:
         cap = cv2.VideoCapture(url)
         if not cap.isOpened():
-            print(f"Error: Couldn't open camera {url}")
+            logging.error(f"Error: Couldn't open camera {url}")
             cap = None
         camera_captures.append(cap)
+        frame_queues.append(Queue(maxsize=30))
+        camera_locks.append(threading.Lock())
+        stop_threads.append(threading.Event())
 
-def update_camera_frames():
-    global camera_frames, camera_captures
-    while True:
-        for i, cap in enumerate(camera_captures):
-            if cap is not None and cap.isOpened():
-                ret, frame = cap.read()
+def update_camera_frames(camera_id):
+    global camera_captures, frame_queues, camera_locks, stop_threads
+    while not stop_threads[camera_id].is_set():
+        with camera_locks[camera_id]:
+            if camera_id < len(camera_captures) and camera_captures[camera_id] is not None and camera_captures[camera_id].isOpened():
+                ret, frame = camera_captures[camera_id].read()
                 if ret:
-                    camera_frames[i] = frame
-        time.sleep(0.1)
-
+                    if frame_queues[camera_id].full():
+                        try:
+                            frame_queues[camera_id].get_nowait()
+                        except Queue.Empty:
+                            pass
+                    frame_queues[camera_id].put(frame)
+        # time.sleep(0.005)  # Short sleep to prevent busy-waiting
 def record_camera(camera_id):
-    global recording, camera_frames, recording_type, folder_name
+    global recording, frame_queues, recording_type, folder_name, view, section
     cap = camera_captures[camera_id]
     if cap is None or not cap.isOpened():
-        print(f"Error: Camera {camera_id} is not available")
+        logging.error(f"Error: Camera {camera_id} is not available")
         return
-
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    if fps <= 0:
-        fps = 20.0  # Default to 20.0 if camera doesn't provide FPS
+    
+    fps = 20
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-
+    
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    filename = f'{folder_name}_camera_{camera_id+1}.mp4'
-    filepath = os.path.join(base_video_dir, folder_name, filename)
+    filename = f'camera_{camera_id+1}.mp4'
+    filepath = os.path.join(base_video_dir, folder_name, view, section, filename)
     os.makedirs(os.path.dirname(filepath), exist_ok=True)
     
     out = cv2.VideoWriter(filepath, fourcc, fps, (width, height))
     if not out.isOpened():
-        print(f"Error: Couldn't open VideoWriter for camera {camera_id}")
+        logging.error(f"Error: Couldn't open VideoWriter for camera {camera_id}")
         return
 
     while recording:
-        if camera_frames[camera_id] is not None:
-            frame = camera_frames[camera_id]
-            if frame.shape[1] != width or frame.shape[0] != height:
-                frame = cv2.resize(frame, (width, height))
+        if not frame_queues[camera_id].empty():
+            frame = frame_queues[camera_id].get()
+            # Get the current time
+            current_time = time.time()
+
+            # Format the time in a readable way
+            formatted_time = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(current_time))
+
+            # Put the formatted time on the image
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            cv2.putText(frame, formatted_time, (50, 150), font, 2, (0, 255, 0), 2, cv2.LINE_AA)
             out.write(frame)
-        time.sleep(0.1)
+        else:
+            time.sleep(0.005)  # Short sleep to prevent busy-waiting
 
     out.release()
-    print(f"Recording stopped for camera {camera_id}")
-
+    # cap.release()
+    logging.info(f"Recording stopped for camera {camera_id}")
 def gen_frames(camera_id):
     while True:
-        if camera_frames[camera_id] is not None:
-            small_frame = cv2.resize(camera_frames[camera_id], (320, 240))
+        if camera_id < len(frame_queues) and not frame_queues[camera_id].empty():
+            frame = frame_queues[camera_id].get()
+            small_frame = cv2.resize(frame, (320, 240))
             ret, buffer = cv2.imencode('.jpg', small_frame)
-            frame = buffer.tobytes()
-            yield (b'--frame\r\n'
-                   b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
-        time.sleep(0.1)
+            if ret:
+                yield (b'--frame\r\n'
+                       b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
+        else:
+            time.sleep(0.005)  # Short sleep to prevent busy-waiting
 
 @app.route('/')
 def index():
     video_files = []
     for root, dirs, files in os.walk(base_video_dir):
         for file in files:
-            if file.endswith('.mp4'):
+            if file.endswith('.avi'):
                 rel_dir = os.path.relpath(root, base_video_dir)
                 video_files.append(os.path.join(rel_dir, file))
     return render_template('index.html', video_files=video_files, num_cameras=num_cameras)
-
-@app.route('/download/<path:filename>')
-def download_file(filename):
-    return send_from_directory(base_video_dir, filename)
-
-@app.route('/video_feed/<int:camera_id>')
-def video_feed(camera_id):
-    return Response(gen_frames(camera_id-1),
-                    mimetype='multipart/x-mixed-replace; boundary=frame')
-
 @app.route('/start_recording', methods=['POST'])
 def start_recording():
-    global recording, threads, recording_type, folder_name
+    global recording, recording_type, folder_name, view, section
     if not recording:
         recording_type = request.json['recordingType']
         folder_name = request.json['filename']
+        view = request.json['view']
+        section = request.json['section']
         if not folder_name:
             return jsonify({"status": "Error: Filename is required"})
         
         recording = True
         for i in range(num_cameras):
-            thread = threading.Thread(target=record_camera, args=(i,))
-            thread.start()
-            threads.append(thread)
-        return jsonify({"status": f"Recording started - {recording_type}", "filename": folder_name})
+            threading.Thread(target=record_camera, args=(i,), daemon=True).start()
+        return jsonify({"status": f"Recording started - {recording_type}", "filename": f"{folder_name}/{view}/{section}"})
     return jsonify({"status": "Already recording"})
-
 @app.route('/stop_recording', methods=['POST'])
 def stop_recording():
-    global recording, threads
+    global recording
     if recording:
         recording = False
-        for thread in threads:
-            thread.join()
-        threads = []
         return jsonify({"status": "Recording stopped"})
     return jsonify({"status": "Not recording"})
+@app.route('/video_feed/<int:camera_id>')
+def video_feed(camera_id):
+    return Response(gen_frames(camera_id-1),
+                    mimetype='multipart/x-mixed-replace; boundary=frame')
 
-@app.route('/create_json', methods=['POST'])
-def create_json():
-    try:
-        data = request.json
-        logging.debug(f"Received data: {data}")
+@app.route('/change_scene', methods=['POST'])
+def change_scene():
+    global current_filename, num_cameras, rtsp_urls, camera_captures, frame_queues, camera_locks, stop_threads
+    view_name = request.json.get('view')
+    
+    if view_name in view_configs:
+        new_filename = view_configs[view_name]
+        if os.path.exists(new_filename):
+            current_filename = new_filename
+            try:
+                # Stop all current camera threads
+                for stop_event in stop_threads:
+                    stop_event.set()
+                time.sleep(0.1)  # Give threads time to stop
 
-        folder_name = data.get('folderName')
-        people = data.get('people')
+                # Close all current camera captures
+                for cap in camera_captures:
+                    if cap is not None:
+                        cap.release()
 
-        if not folder_name or not people:
-            return jsonify({"error": "Missing folderName or people data"}), 400
+                # Read new configuration
+                num_cameras, rtsp_urls = read_camera_config(current_filename)
+                
+                # Reinitialize cameras
+                initialize_cameras()
 
-        json_data = {
-            "name": folder_name,
-            "description": people
-        }
+                # Start new camera threads
+                for i in range(num_cameras):
+                    threading.Thread(target=update_camera_frames, args=(i,), daemon=True).start()
 
-        json_file_path = os.path.join(base_video_dir, folder_name, f"{folder_name}_info.json")
-        os.makedirs(os.path.dirname(json_file_path), exist_ok=True)
-
-        logging.debug(f"Attempting to write JSON to: {json_file_path}")
-        logging.debug(f"JSON data: {json_data}")
-
-        with open(json_file_path, 'w') as json_file:
-            json.dump(json_data, json_file, indent=4)
-
-        logging.info(f"JSON file created successfully at {json_file_path}")
-        return jsonify({"status": "JSON file created successfully"})
-
-    except json.JSONDecodeError as e:
-        logging.error(f"JSON Decode Error: {str(e)}")
-        return jsonify({"error": "Invalid JSON data"}), 400
-    except IOError as e:
-        logging.error(f"I/O Error: {str(e)}")
-        return jsonify({"error": "Error writing JSON file"}), 500
-    except Exception as e:
-        logging.error(f"Unexpected error: {str(e)}")
-        return jsonify({"error": "An unexpected error occurred"}), 500
-
-@app.route('/get_json/<folder_name>')
-def get_json(folder_name):
-    json_file_path = os.path.join(base_video_dir, folder_name, f"{folder_name}_info.json")
-    if os.path.exists(json_file_path):
-        with open(json_file_path, 'r') as json_file:
-            data = json.load(json_file)
-        return jsonify(data)
+                return jsonify({
+                    'status': 'success',
+                    'message': f'Scene changed to {view_name}',
+                    'num_cameras': num_cameras,
+                    'rtsp_urls': rtsp_urls
+                })
+            except Exception as e:
+                return jsonify({
+                    'status': 'error',
+                    'message': f'Error reading config file: {str(e)}'
+                }), 400
+        else:
+            return jsonify({
+                'status': 'error',
+                'message': f'Config file for {view_name} does not exist'
+            }), 400
     else:
-        return jsonify({"error": "JSON file not found"}), 404
+        return jsonify({
+            'status': 'error',
+            'message': 'Invalid view selected'
+        }), 400
+
+@app.route('/get_current_config')
+def get_current_config():
+    try:
+        num_cameras, rtsp_urls = read_camera_config(current_filename)
+        return jsonify({
+            'status': 'success',
+            'filename': current_filename,
+            'num_cameras': num_cameras,
+            'rtsp_urls': rtsp_urls
+        })
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'message': f'Error reading config file: {str(e)}'
+        }), 400
 
 if __name__ == '__main__':
     initialize_cameras()
-    frame_update_thread = threading.Thread(target=update_camera_frames, daemon=True)
-    frame_update_thread.start()
-    app.run(debug=True, use_reloader=False)
+    for i in range(num_cameras):
+        threading.Thread(target=update_camera_frames, args=(i,), daemon=True).start()
+    app.run(debug=True, threaded=True)
